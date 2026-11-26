@@ -1,178 +1,148 @@
 import os
-import re
 import json
 import html
 import urllib.request
-import urllib.error
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
-# Model ishlamasa, keyingisi sinab ko'riladi. Kerak bo'lsa GEMINI_MODEL orqali o'zgartiring.
-MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"] if m]
+# Ixtiyoriy: haqiqiy Telegram stikerlari. Kun raqami (0=dushanba ... 6=yakshanba) -> sticker file_id
+# Bo'sh qoldirsangiz, stikersiz, faqat emojilar bilan yuboriladi.
+STICKERS = {
+    # 0: "CAACAgIAAxkBA....",
+}
 
-FEEDS = [
-    "https://techcrunch.com/category/artificial-intelligence/feed/",
-    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
-    "https://www.technologyreview.com/topic/artificial-intelligence/feed",
-    "https://venturebeat.com/category/ai/feed/",
-    "https://blog.google/technology/ai/rss/",
-    "https://openai.com/news/rss.xml",
-]
+MONTHS = ["yanvar", "fevral", "mart", "aprel", "may", "iyun",
+          "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"]
+DAYS = ["Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba", "Yakshanba"]
 
-HOURS = 36
-MAX_ITEMS = 40
+PARA_TIMES = {1: "08:00 – 09:20", 2: "09:30 – 10:50", 3: "11:00 – 12:20"}
+
+SUBJECT_EMOJI = {
+    "Matematika": "📐",
+    "Akademik ko'nikmalar va kasbiy kompetentlik": "🎯",
+    "Iqtisodiyotda axborot texnologiyalari va tizimlari": "💻",
+    "Madaniyat": "🎭",
+    "Iqtisodiyot nazariyasi": "📈",
+    "Biznesga kirish": "💼",
+    "Xorijiy til": "🌍",
+}
+
+# (para raqami, fan, turi, xona)
+SCHEDULE = {
+    0: [(1, "Matematika", "ma'ruza", "3-bino · 514-xona"),
+        (2, "Akademik ko'nikmalar va kasbiy kompetentlik", "amaliy", "2-bino · 322-xona"),
+        (3, "Iqtisodiyotda axborot texnologiyalari va tizimlari", "ma'ruza", "3-bino · 514-xona")],
+    1: [(1, "Madaniyat", "", "2-bino · 313-xona"),
+        (2, "Iqtisodiyot nazariyasi", "amaliy", "2-bino · 513-xona"),
+        (3, "Biznesga kirish", "amaliy", "2-bino · 413-xona")],
+    2: [(2, "Iqtisodiyotda axborot texnologiyalari va tizimlari", "amaliy", "3-bino · 404-xona"),
+        (3, "Akademik ko'nikmalar va kasbiy kompetentlik", "ma'ruza", "3-bino · 106-xona")],
+    3: [(1, "Biznesga kirish", "ma'ruza", "2-bino · 511-xona"),
+        (2, "Xorijiy til", "amaliy", "1-bino · 305 yoki 306-xona"),
+        (3, "Xorijiy til", "amaliy", "1-bino · 305 yoki 306-xona")],
+    4: [(1, "Iqtisodiyot nazariyasi", "ma'ruza", "3-bino · 514-xona"),
+        (2, "Matematika", "amaliy", "3-bino · 209-xona")],
+}
+
+HEADERS = {
+    0: ("🌅", "Yangi hafta — toza sahifa"),
+    1: ("☕", "Ritm topildi, davom"),
+    2: ("🌿", "Haftaning yarmi ortda"),
+    3: ("⚡", "Yakunga bir qadam qoldi"),
+    4: ("🎉", "Juma — oxirgi yuz metr"),
+    5: ("🏃", "Yugurish kuni"),
+    6: ("🌤", "Yengil yugurish va tiklanish"),
+}
+
+QUOTES = {
+    0: "Katta natija — har kuni qilingan kichik ishlardan quriladi.",
+    1: "Intizom — motivatsiya tugagan joyda ishlaydigan narsa.",
+    2: "To'xtamasdan sekin yurish — to'xtab-to'xtab yugurishdan yaxshi.",
+    3: "Bugungi harakat — kelgusi haftaning ishonchi.",
+    4: "Haftani chiroyli yoping, dam olish haq qilingan bo'ladi.",
+}
+
+LINE = "━━━━━━━━━━━━━━━━━━"
 
 
-def http(url, data=None, headers=None, timeout=30):
-    req = urllib.request.Request(url, data=data, headers=headers or {"User-Agent": "Mozilla/5.0 (ai-news-bot)"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+def e(s):
+    return html.escape(s, quote=False)
+
+
+def day_message(wd, now):
+    emoji, title = HEADERS[wd]
+    date_txt = f"{now.day}-{MONTHS[now.month - 1]}"
+    head = f"{emoji} <b>{DAYS[wd]}</b>  ·  {date_txt}\n<i>{e(title)}</i>\n{LINE}\n"
+
+    if wd >= 5:
+        if wd == 5:
+            body = (
+                "\n🏃‍♂️ <b>Bugun yugurish kuni!</b>\n\n"
+                "▫️ Krossovka va qulay kiyimni tayyorlang\n"
+                "▫️ Yugurishdan oldin 5-10 daqiqa razminka\n"
+                "▫️ Suv olishni unutmang 💧\n"
+                "▫️ Tezlik emas, barqarorlik muhim\n"
+            )
+            quote = "Eng qiyin qadam — eshikdan chiqish. Qolgani o'zi bo'ladi."
+        else:
+            body = (
+                "\n🏃‍♂️ <b>Bugun ham yugurish kuni!</b>\n\n"
+                "▫️ Kecha charchagan bo'lsangiz, sekinroq yuguring\n"
+                "▫️ Yugurgach cho'zilish mashqlarini qiling\n"
+                "▫️ Kechqurun ertangi dars uchun sumkani tayyorlab qo'ying 🎒\n"
+            )
+            quote = "Dam olish ham rejaning bir qismi. Ertaga yangi hafta."
+        return head + body + f"\n{LINE}\n💬 <i>{e(quote)}</i>"
+
+    lessons = SCHEDULE[wd]
+    first_para = lessons[0][0]
+    start = PARA_TIMES[first_para].split(" – ")[0]
+    count = len(lessons)
+    intro = f"\n🎒 Bugun <b>{count} ta para</b>, boshlanishi <b>{start}</b> da\n"
+    if first_para > 1:
+        intro += "😌 <i>Ertalab biroz ko'proq vaqtingiz bor</i>\n"
+    out = head + intro
+
+    for para, subject, kind, room in lessons:
+        icon = SUBJECT_EMOJI.get(subject, "📘")
+        kind_txt = f" <i>({e(kind)})</i>" if kind else ""
+        out += (
+            f"\n<b>{para}-para</b>  ·  🕘 {PARA_TIMES[para]}\n"
+            f"{icon} {e(subject)}{kind_txt}\n"
+            f"📍 {e(room)}\n"
+        )
+
+    last_para = lessons[-1][0]
+    end = PARA_TIMES[last_para].split(" – ")[1]
+    out += f"\n{LINE}\n🏁 Darslar <b>{end}</b> da tugaydi\n💬 <i>{e(QUOTES[wd])}</i>"
+    return out
+
+
+def tg(method, payload):
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TOKEN}/{method}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
         return r.read()
 
 
-def clean(text, limit=300):
-    text = html.unescape(re.sub(r"<[^>]+>", " ", text or ""))
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:limit]
-
-
-def parse_date(s):
-    if not s:
-        return None
-    try:
-        d = parsedate_to_datetime(s)
-    except Exception:
-        try:
-            d = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        except Exception:
-            return None
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=timezone.utc)
-    return d
-
-
-def strip_ns(tag):
-    return tag.split("}", 1)[-1]
-
-
-def read_feed(url):
-    root = ET.fromstring(http(url))
-    items = []
-    for el in root.iter():
-        if strip_ns(el.tag) not in ("item", "entry"):
-            continue
-        f = {}
-        for c in el:
-            name = strip_ns(c.tag)
-            if name == "link":
-                f["link"] = c.get("href") or (c.text or "")
-            elif name in ("title", "description", "summary", "pubDate", "published", "updated"):
-                f.setdefault(name, c.text or "")
-        items.append({
-            "title": clean(f.get("title"), 200),
-            "summary": clean(f.get("description") or f.get("summary")),
-            "link": (f.get("link") or "").strip(),
-            "date": parse_date(f.get("pubDate") or f.get("published") or f.get("updated")),
-            "source": re.sub(r"^www\.", "", url.split("/")[2]),
-        })
-    return items
-
-
-def collect():
-    since = datetime.now(timezone.utc) - timedelta(hours=HOURS)
-    all_items = []
-    for url in FEEDS:
-        try:
-            for it in read_feed(url):
-                if it["date"] is None or it["date"] >= since:
-                    all_items.append(it)
-        except Exception as e:
-            print(f"Lenta o'qilmadi: {url} -> {e}")
-    all_items.sort(key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    seen, unique = set(), []
-    for it in all_items:
-        key = it["title"].lower()
-        if key and key not in seen:
-            seen.add(key)
-            unique.append(it)
-    return unique[:MAX_ITEMS]
-
-
-def ask_gemini(prompt):
-    last_err = None
-    for model in MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
-        headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
-        try:
-            out = json.loads(http(url, body, headers, timeout=120))
-            parts = out["candidates"][0]["content"]["parts"]
-            text = "".join(p.get("text", "") for p in parts).strip()
-            if text:
-                print(f"Model: {model}")
-                return text
-        except urllib.error.HTTPError as e:
-            last_err = f"{model}: {e.code} {e.read().decode()[:200]}"
-            print("Gemini xatosi:", last_err)
-        except Exception as e:
-            last_err = f"{model}: {e}"
-            print("Gemini xatosi:", last_err)
-    raise RuntimeError(f"Hech bir model ishlamadi. Oxirgi xato: {last_err}")
-
-
-def build_prompt(items):
-    lines = []
-    for i, it in enumerate(items, 1):
-        lines.append(f"{i}. [{it['source']}] {it['title']}\n   {it['summary']}\n   {it['link']}")
-    news = "\n".join(lines)
-    return f"""Sen sun'iy intellekt sohasi bo'yicha tahlilchisan. Quyida oxirgi 24-36 soatdagi AI yangiliklari ro'yxati bor.
-
-Vazifa: shu ro'yxatdan dunyo uchun eng muhim 3 ta yangilikni tanla (bir xil voqeaning takrorlarini bitta deb hisobla; mayda mahsulot yangiliklaridan ko'ra sohaga katta ta'sir qiladiganlarini afzal ko'r).
-
-Har bir yangilik uchun O'ZBEK tilida (oddiy, tushunarli) yoz:
-- Sarlavha
-- Nima bo'ldi (2-3 gap)
-- Nima uchun muhim (2-3 gap)
-- Keyingi oqibatlari yoki nimani kuzatish kerak (1-2 gap)
-- Manba havolasi
-
-Faqat ro'yxatdagi ma'lumotga tayan, o'zingdan fakt to'qima. Ro'yxatda aniq bo'lmagan narsani taxmin qilma. Markdown belgilarini (*, #, _) ishlatma, oddiy matn yoz. Boshiga "AI yangiliklari" deb qisqa sarlavha qo'y.
-
-YANGILIKLAR:
-{news}
-"""
-
-
-def send_telegram(text):
-    chunks, cur = [], ""
-    for para in text.split("\n\n"):
-        if len(cur) + len(para) + 2 > 3800:
-            chunks.append(cur)
-            cur = para
-        else:
-            cur = f"{cur}\n\n{para}" if cur else para
-    if cur:
-        chunks.append(cur)
-    for c in chunks:
-        payload = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": c, "disable_web_page_preview": True}).encode()
-        http(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", payload, {"Content-Type": "application/json"})
-
-
 def main():
-    items = collect()
-    print(f"Topilgan maqolalar: {len(items)}")
-    if not items:
-        send_telegram("Bugun yangiliklar lentalaridan maqola olib bo'lmadi. Ertaga qayta urinaman.")
+    now = datetime.now(ZoneInfo("Asia/Tashkent"))
+    test_day = os.environ.get("TEST_DAY", "").strip()
+    wd = int(test_day) if test_day.isdigit() and 0 <= int(test_day) <= 6 else now.weekday()
+    text = day_message(wd, now)
+    if DRY_RUN:
+        print(text)
         return
-    try:
-        send_telegram(ask_gemini(build_prompt(items)))
-    except Exception as e:
-        send_telegram(f"Bot xatosi: {str(e)[:500]}")
-        raise
+    if wd in STICKERS:
+        tg("sendSticker", {"chat_id": CHAT_ID, "sticker": STICKERS[wd]})
+    tg("sendMessage", {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
 
 
 if __name__ == "__main__":
