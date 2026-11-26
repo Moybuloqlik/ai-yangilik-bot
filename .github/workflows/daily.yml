@@ -1,9 +1,13 @@
-name: Kunlik AI yangiliklari
+name: Kunlik reja
 
 on:
   schedule:
-    - cron: "0 2 * * *"   # 02:00 UTC = Toshkent vaqti 07:00
-  workflow_dispatch:       # qo'lda ishga tushirish uchun
+    - cron: "0 0 * * *"   # 00:00 UTC = Toshkent vaqti 05:00
+  workflow_dispatch:
+    inputs:
+      kun:
+        description: "Sinov uchun kun raqami (0=dushanba, 1=seshanba ... 6=yakshanba). Bo'sh qoldirsangiz, bugungi kun."
+        required: false
 
 jobs:
   send:
@@ -13,9 +17,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Botni ishga tushirish
+      - name: Rejani yuborish
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_DAY: ${{ github.event.inputs.kun }}
         run: python bot.py
